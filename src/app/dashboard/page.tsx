@@ -6,15 +6,8 @@ import Link from 'next/link';
 import dynamic from 'next/dynamic';
 import { User, Entry, GraphData } from './types';
 
-// Dynamically import the graph component (client-side only)
-const GraphView = dynamic(() => import('./GraphView'), { 
-  ssr: false,
-  loading: () => (
-    <div className="flex items-center justify-center h-full">
-      <div className="w-12 h-12 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-    </div>
-  )
-});
+// Import the graph component directly
+import GraphView from './graph-view';
 
 // Dynamically import components (client-side only)
 const EntryDetailModal = dynamic(() => import('./EntryDetailModal'), { ssr: false });
@@ -67,13 +60,15 @@ export default function Dashboard() {
     title: '',
     content: '',
     contentType: 'text' as 'text' | 'code' | 'image',
-    tags: []
+    tags: [] as string[]
   });
   const [newTag, setNewTag] = useState('');
   const [suggestedTags, setSuggestedTags] = useState<string[]>([]);
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [searchStatus, setSearchStatus] = useState<'idle' | 'semantic' | 'text' | 'error'>('idle');
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [showOnlyConnected, setShowOnlyConnected] = useState(false);
   
   const graphRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
@@ -170,7 +165,7 @@ export default function Dashboard() {
       
       if (!userId) throw new Error('User ID not found');
       
-      // Call the search API
+      // Call the search API with a minimum relevance threshold
       const response = await fetch('/api/entries/search', {
         method: 'POST',
         headers: {
@@ -179,7 +174,8 @@ export default function Dashboard() {
         },
         body: JSON.stringify({
           query: searchQuery,
-          userId
+          userId,
+          minRelevance: 0.65 // Only return results that are at least 65% similar
         })
       });
       
@@ -441,6 +437,9 @@ export default function Dashboard() {
     
     if (!node) return;
     
+    // Set the focused node ID
+    setFocusedNodeId(node.id);
+    
     if (node.group === 'entry') {
       // Find the entry and show its details
       const entry = entries.find(e => e._id === node.id);
@@ -464,6 +463,23 @@ export default function Dashboard() {
       }, 0);
     }
   }, [entries]);
+  
+  // Toggle between showing all nodes and only connected nodes
+  const handleToggleConnectionView = useCallback(() => {
+    setShowOnlyConnected(prev => !prev);
+  }, []);
+  
+  // When closing the modal, clear the focused node if showOnlyConnected is true
+  const handleCloseModal = useCallback(() => {
+    setSelectedEntry(null);
+    if (showOnlyConnected) {
+      // Either reset to show all nodes or keep the focused view without the modal
+      if (confirm('Return to full graph view?')) {
+        setFocusedNodeId(null);
+        setShowOnlyConnected(false);
+      }
+    }
+  }, [showOnlyConnected]);
   
   // Add a function to delete an entry
   const handleDeleteEntry = async (entryId: string) => {
@@ -521,6 +537,18 @@ export default function Dashboard() {
       setLoading(false);
     }
   };
+  
+  // Function to handle viewing connections of a specific entry in graph view
+  const handleViewConnections = useCallback((entryId: string) => {
+    // Switch to graph view if not already in it
+    setViewMode('graph');
+    
+    // Set the focused node ID
+    setFocusedNodeId(entryId);
+    
+    // Enable "show only connected" mode
+    setShowOnlyConnected(true);
+  }, []);
   
   if (loading && !user) {
     return (
@@ -674,7 +702,10 @@ export default function Dashboard() {
             {graphData.nodes.length > 0 ? (
               <GraphView 
                 graphData={graphData} 
-                onNodeClick={handleNodeClick} 
+                onNodeClick={handleNodeClick}
+                focusNodeId={focusedNodeId}
+                showOnlyConnected={showOnlyConnected}
+                onToggleConnectionView={handleToggleConnectionView}
               />
             ) : (
               <div className="flex items-center justify-center h-full">
@@ -824,13 +855,20 @@ export default function Dashboard() {
       {selectedEntry && (
         <EntryDetailModal
           entry={selectedEntry}
-          onClose={() => setSelectedEntry(null)}
+          onClose={handleCloseModal}
           onDelete={handleDeleteEntry}
-          onEntryUpdated={(updatedEntry) => {
-            // Update the entry in the entries array
-            setEntries(entries.map(entry => 
-              entry._id === updatedEntry._id ? updatedEntry : entry
-            ));
+          isGraphMode={viewMode === 'graph'}
+          onViewConnections={handleViewConnections}
+          onEntryUpdated={(updatedEntry, allEntries) => {
+            if (allEntries) {
+              // If we have a full set of entries, update the entire array
+              setEntries(allEntries);
+            } else {
+              // Otherwise just update the specific entry
+              setEntries(entries.map(entry => 
+                entry._id === updatedEntry._id ? updatedEntry : entry
+              ));
+            }
             
             // Update the selected entry
             setSelectedEntry(updatedEntry);

@@ -68,18 +68,31 @@ export async function POST(request: NextRequest) {
     
     // Generate reasons and create links
     const linkedEntries = [];
+    const bidirectionalUpdates = []; // Track entries that need bidirectional links
     
     for (const { entry, score } of similarEntries) {
-      // Generate reason for the link
-      const reason = await generateLinkReason(sourceEntry, entry);
+      // Generate reason for the link - pass the vector similarity score
+      const reason = await generateLinkReason(sourceEntry, entry, score);
       
       // Only add links with valid reasons (not null)
       if (reason !== null) {
         // Create link object
-        linkedEntries.push({
+        const linkObject = {
           entryId: entry._id,
           reason,
           score
+        };
+        
+        linkedEntries.push(linkObject);
+        
+        // Create bidirectional link data
+        bidirectionalUpdates.push({
+          targetEntryId: entry._id,
+          linkObject: {
+            entryId: sourceEntry._id,
+            reason, // Same reason
+            score // Same score
+          }
         });
       }
     }
@@ -102,6 +115,29 @@ export async function POST(request: NextRequest) {
       ];
       
       await sourceEntry.save();
+      
+      // Create bidirectional links
+      for (const update of bidirectionalUpdates) {
+        const targetEntry = await Entry.findById(update.targetEntryId);
+        
+        if (targetEntry) {
+          // Check if this link already exists
+          const targetExistingLinks = targetEntry.linkedEntries || [];
+          const alreadyLinked = targetExistingLinks.some(
+            (link: any) => link.entryId.toString() === sourceEntry._id.toString()
+          );
+          
+          // Only add if not already linked
+          if (!alreadyLinked) {
+            targetEntry.linkedEntries = [
+              ...targetExistingLinks,
+              update.linkObject
+            ];
+            
+            await targetEntry.save();
+          }
+        }
+      }
     }
     
     return NextResponse.json({

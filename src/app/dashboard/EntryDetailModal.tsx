@@ -1,17 +1,102 @@
 "use client";
 
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { Entry } from './types';
 import Link from 'next/link';
+
+// Component to fetch and display the details of a linked entry
+function LinkedEntryDetails({ entryId }: { entryId: string }) {
+  const [entryDetails, setEntryDetails] = useState<Entry | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchEntryDetails = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        const token = localStorage.getItem('token');
+        if (!token) throw new Error('Not authenticated');
+        
+        const response = await fetch(`/api/entries/${entryId}`, {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error('Failed to fetch entry details');
+        }
+        
+        const data = await response.json();
+        setEntryDetails(data.data);
+      } catch (error) {
+        console.error('Error fetching entry details:', error);
+        setError(error instanceof Error ? error.message : 'Unknown error');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchEntryDetails();
+  }, [entryId]);
+  
+  if (loading) {
+    return <div className="text-sm text-gray-500">Loading entry details...</div>;
+  }
+  
+  if (error) {
+    return <div className="text-sm text-red-500">Error: {error}</div>;
+  }
+  
+  if (!entryDetails) {
+    return <div className="text-sm text-gray-500">Entry not found</div>;
+  }
+  
+  return (
+    <div className="border-t border-blue-200 pt-2 mt-1">
+      <h4 className="text-sm font-medium text-gray-900">{entryDetails.title}</h4>
+      <div className="mt-1 text-xs text-gray-600 line-clamp-3">
+        {entryDetails.contentType === 'code' ? (
+          <pre className="bg-gray-50 p-2 rounded-md overflow-x-auto text-xs font-mono text-gray-800 max-h-24">{entryDetails.content}</pre>
+        ) : (
+          <p className="text-gray-600 whitespace-pre-wrap">{entryDetails.content.substring(0, 150)}{entryDetails.content.length > 150 ? '...' : ''}</p>
+        )}
+      </div>
+      {entryDetails.tags && entryDetails.tags.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1">
+          {entryDetails.tags.slice(0, 3).map(tag => (
+            <span key={tag} className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+              {tag}
+            </span>
+          ))}
+          {entryDetails.tags.length > 3 && (
+            <span className="text-xs text-gray-500">+{entryDetails.tags.length - 3} more</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface EntryDetailModalProps {
   entry: Entry;
   onClose: () => void;
   onDelete: (entryId: string) => Promise<void>;
-  onEntryUpdated?: (updatedEntry: Entry) => void;
+  onEntryUpdated?: (updatedEntry: Entry, allEntries?: Entry[]) => void;
+  onViewConnections?: (entryId: string) => void;
+  isGraphMode?: boolean;
 }
 
-export default function EntryDetailModal({ entry, onClose, onDelete, onEntryUpdated }: EntryDetailModalProps) {
+export default function EntryDetailModal({ 
+  entry, 
+  onClose, 
+  onDelete, 
+  onEntryUpdated,
+  onViewConnections,
+  isGraphMode = false
+}: EntryDetailModalProps) {
   const [loading, setLoading] = useState(false);
   const [currentEntry, setCurrentEntry] = useState<Entry>(entry);
   const [autoLinkResults, setAutoLinkResults] = useState<{
@@ -72,8 +157,9 @@ export default function EntryDetailModal({ entry, onClose, onDelete, onEntryUpda
       const data = await response.json();
       setAutoLinkResults(data.data);
       
-      // If successful and links were found, fetch the updated entry
+      // If successful and links were found, fetch the updated entry and all linked entries
       if (data.data.linkedEntries && data.data.linkedEntries.length > 0) {
+        // First get the current (source) entry
         const entryResponse = await fetch(`/api/entries/${currentEntry._id}`, {
           headers: {
             Authorization: `Bearer ${token}`
@@ -84,9 +170,29 @@ export default function EntryDetailModal({ entry, onClose, onDelete, onEntryUpda
           const entryData = await entryResponse.json();
           setCurrentEntry(entryData.data);
           
-          // Notify parent component if callback is provided
+          // Notify parent component to refresh all entries to capture the bidirectional links
           if (onEntryUpdated) {
-            onEntryUpdated(entryData.data);
+            // Fetch all entries to get the complete updated state with bidirectional links
+            const allEntriesResponse = await fetch('/api/entries', {
+              headers: {
+                Authorization: `Bearer ${token}`
+              }
+            });
+            
+            if (allEntriesResponse.ok) {
+              const allEntriesData = await allEntriesResponse.json();
+              
+              // Update the current entry with the latest version from the full dataset
+              const updatedCurrentEntry = allEntriesData.data.find(
+                (entry: any) => entry._id === currentEntry._id
+              );
+              
+              if (updatedCurrentEntry) {
+                setCurrentEntry(updatedCurrentEntry);
+                // Pass the full set of entries to the parent for update
+                onEntryUpdated(updatedCurrentEntry, allEntriesData.data);
+              }
+            }
           }
         }
       }
@@ -97,6 +203,14 @@ export default function EntryDetailModal({ entry, onClose, onDelete, onEntryUpda
       setLoading(false);
     }
   }, [currentEntry._id, loading, onEntryUpdated]);
+  
+  // Handle viewing connections in graph mode
+  const handleViewConnections = useCallback(() => {
+    if (onViewConnections) {
+      onViewConnections(currentEntry._id);
+      onClose();
+    }
+  }, [currentEntry._id, onViewConnections, onClose]);
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -148,23 +262,26 @@ export default function EntryDetailModal({ entry, onClose, onDelete, onEntryUpda
           {currentEntry.linkedEntries && currentEntry.linkedEntries.length > 0 && (
             <div className="mt-6">
               <h3 className="text-md font-medium text-gray-900 mb-2">Related Entries</h3>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {currentEntry.linkedEntries.map((link, index) => (
                   <div 
                     key={`${link.entryId}-${index}`} 
-                    className={`p-3 rounded-md ${link.isContradiction ? 'bg-red-50 border border-red-200' : 'bg-gray-50 border border-gray-200'}`}
+                    className={`p-4 rounded-md ${link.isContradiction ? 'bg-red-50 border border-red-200' : 'bg-blue-50 border border-blue-200'}`}
                   >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <p className={`text-sm font-medium ${link.isContradiction ? 'text-red-700' : 'text-gray-800'}`}>
+                    <div className="flex flex-col space-y-2">
+                      <div className="flex justify-between items-start">
+                        <p className={`text-sm font-medium ${link.isContradiction ? 'text-red-700' : 'text-blue-700'}`}>
                           {link.reason}
                         </p>
                         {link.score && (
-                          <p className="text-xs text-gray-500 mt-1">
-                            Similarity: {Math.round(link.score * 100)}%
-                          </p>
+                          <span className="text-xs py-1 px-2 bg-blue-100 rounded-full text-blue-800">
+                            {Math.round(link.score * 100)}% similar
+                          </span>
                         )}
                       </div>
+                      
+                      {/* New: Fetch and show related entry content */}
+                      <LinkedEntryDetails entryId={link.entryId.toString()} />
                     </div>
                   </div>
                 ))}
@@ -184,14 +301,26 @@ export default function EntryDetailModal({ entry, onClose, onDelete, onEntryUpda
           )}
           
           <div className="mt-6 flex justify-between">
-            <button
-              type="button"
-              onClick={handleFindRelated}
-              disabled={loading}
-              className={`px-4 py-2 ${loading ? 'bg-gray-300' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'} rounded-md text-sm font-medium transition-colors`}
-            >
-              {loading ? 'Finding related...' : 'Find Related Entries'}
-            </button>
+            <div className="flex space-x-2">
+              <button
+                type="button"
+                onClick={handleFindRelated}
+                disabled={loading}
+                className={`px-4 py-2 ${loading ? 'bg-gray-300' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'} rounded-md text-sm font-medium transition-colors`}
+              >
+                {loading ? 'Finding related...' : 'Find Related Entries'}
+              </button>
+              
+              {onViewConnections && !isGraphMode && (
+                <button
+                  type="button"
+                  onClick={handleViewConnections}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700 transition-colors"
+                >
+                  View Connections in Graph
+                </button>
+              )}
+            </div>
             
             <button
               type="button"

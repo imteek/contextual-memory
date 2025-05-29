@@ -3,13 +3,16 @@ import { dbConnect, Entry } from '@/lib/database';
 import mongoose from 'mongoose';
 import { generateEmbeddings } from '@/lib/openai';
 
+// Type for MongoDB's aggregation pipeline stages
+type MongoSortOrder = 1 | -1;
+
 export async function POST(request: NextRequest) {
   try {
     await dbConnect();
     
     // Parse request body
     const body = await request.json();
-    const { query, embeddings, userId, projectId, limit = 10 } = body;
+    const { query, embeddings, userId, projectId, limit = 10, minRelevance = 0.65 } = body;
     
     // Validate
     if ((!query && !embeddings) || !userId) {
@@ -60,59 +63,101 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // Search with embeddings (vector search)
-    if (queryEmbeddings && Array.isArray(queryEmbeddings) && queryEmbeddings.length > 0) {
-      // Note: This vector search works specifically with MongoDB Atlas Vector Search
-      // You need to have the vector search index set up as described in the Entry model
+    // Perform vector search if we have embeddings
+    if (queryEmbeddings && queryEmbeddings.length > 0) {
       try {
-        results = await Entry.aggregate([
-          {
-            $vectorSearch: {
-              index: "vector_index",
+        // Create the search pipeline
+        const searchStage = {
+          $search: {
+            index: "vector_index",
+            knnBeta: {
+              vector: queryEmbeddings,
               path: "embeddings",
-              queryVector: queryEmbeddings,
-              numCandidates: limit * 10,
-              limit: limit
-            }
-          },
-          {
-            $match: matchCriteria
-          },
-          {
-            $project: {
-              _id: 1,
-              title: 1,
-              content: 1,
-              contentType: 1,
-              tags: 1,
-              createdAt: 1,
-              updatedAt: 1,
-              score: { $meta: "vectorSearchScore" }
+              k: limit * 2 // Get more results initially to filter by relevance
             }
           }
+        };
+        
+        const matchStage = {
+          $match: matchCriteria
+        };
+        
+        const projectStage = {
+          $project: {
+            _id: 1,
+            title: 1,
+            content: 1,
+            contentType: 1,
+            tags: 1,
+            linkedEntries: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            score: { $meta: "searchScore" }
+          }
+        };
+        
+        const sortStage = {
+          $sort: { score: -1 as MongoSortOrder }
+        };
+        
+        // Execute search with properly typed pipeline
+        const searchResults = await Entry.aggregate([
+          searchStage,
+          matchStage,
+          projectStage,
+          sortStage
         ]);
+        
+        // Filter by minimum relevance threshold
+        // The scores are normalized to [0, 1] range
+        const maxScore = searchResults.length > 0 ? searchResults[0].score : 1;
+        const filteredResults = searchResults
+          .map(result => ({
+            ...result,
+            // Normalize the score to [0, 1] range
+            normalizedScore: result.score / maxScore
+          }))
+          .filter(result => result.normalizedScore >= minRelevance)
+          .slice(0, limit);
+        
+        console.log(`Found ${searchResults.length} results, filtered to ${filteredResults.length} by relevance threshold ${minRelevance}`);
+        
+        // Return filtered results
+        return NextResponse.json({
+          status: 'success',
+          data: filteredResults,
+          searchInfo: {
+            type: 'semantic',
+            totalResults: searchResults.length,
+            filteredResults: filteredResults.length,
+            relevanceThreshold: minRelevance
+          }
+        });
       } catch (error) {
-        console.error('Vector search failed, falling back to text search:', error);
-        // If vector search fails (e.g., not set up), fall back to text search
-        results = await textSearch(query, matchCriteria, limit);
+        console.error('Vector search failed:', error);
+        // Fall back to text search
+        return NextResponse.json({
+          status: 'success',
+          data: await textSearch(query, matchCriteria, limit),
+          searchInfo: {
+            type: 'text',
+            reason: 'Vector search failed'
+          }
+        });
       }
-    } else if (query) {
-      // Text-based search
-      results = await textSearch(query, matchCriteria, limit);
+    } else {
+      // No embeddings, use text search
+      return NextResponse.json({
+        status: 'success',
+        data: await textSearch(query, matchCriteria, limit),
+        searchInfo: {
+          type: 'text',
+          reason: 'No embeddings available'
+        }
+      });
     }
-    
-    // If no results found or something went wrong, default to text search
-    if (!results || results.length === 0) {
-      console.log('No vector search results, falling back to text search');
-      results = await textSearch(query, matchCriteria, limit);
-    }
-    
-    return NextResponse.json({
-      status: 'success',
-      data: results || []
-    });
   } catch (error) {
-    console.error('Error searching entries:', error);
+    console.error('Search error:', error);
     return NextResponse.json(
       { 
         status: 'error',
@@ -124,31 +169,21 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Helper function for text-based search
+// Perform a text-based search
 async function textSearch(query: string, matchCriteria: any, limit: number) {
-  if (!query) return [];
-  
-  // Simple regex search in content and tags
-  const textQuery = {
+  // Create text search query
+  const textSearchCriteria = {
+    ...matchCriteria,
     $or: [
       { title: { $regex: query, $options: 'i' } },
       { content: { $regex: query, $options: 'i' } },
-      { tags: { $in: [new RegExp(query, 'i')] } }
+      { tags: { $regex: query, $options: 'i' } }
     ]
   };
   
-  const combinedQuery = {
-    ...matchCriteria,
-    ...textQuery
-  };
-  
-  try {
-    return await Entry.find(combinedQuery)
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
-  } catch (err) {
-    console.error('Error during text search:', err);
-    return [];
-  }
+  // Execute search
+  return await Entry.find(textSearchCriteria)
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
 } 

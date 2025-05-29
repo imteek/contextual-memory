@@ -32,6 +32,8 @@ export interface GraphNode {
   val: number;
   color: string;
   group: string;
+  fx?: number;  // Fixed x-position (for stable layout)
+  fy?: number;  // Fixed y-position (for stable layout)
 }
 
 export interface GraphLink {

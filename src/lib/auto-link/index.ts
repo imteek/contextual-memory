@@ -3,6 +3,30 @@ import mongoose from 'mongoose';
 import { generateEmbeddings } from '@/lib/openai';
 import OpenAI from 'openai';
 
+/**
+ * Auto-Linking System
+ * 
+ * This module implements a two-stage approach to identifying semantically related entries:
+ * 
+ * 1. Vector Similarity (Quantitative):
+ *    - Uses MongoDB Atlas vector search with the knnBeta operator
+ *    - Efficiently filters potential matches based on embedding vector similarity
+ *    - Sets a minimum similarity threshold (default: 0.7 or 70%)
+ *    - Fast and scalable, but can only detect pattern-based similarity
+ * 
+ * 2. Semantic Understanding (Qualitative):
+ *    - For entries that pass the vector similarity threshold, uses GPT-4 for semantic analysis
+ *    - Determines if there's a meaningful connection beyond statistical similarity
+ *    - Generates a natural language explanation of the relationship
+ *    - May reject connections that have high vector similarity but lack semantic meaning
+ *    - Skip this step for extremely high similarity scores (>0.9 or 90%)
+ * 
+ * This approach balances efficiency and accuracy:
+ * - Vector search quickly filters down to potential matches
+ * - LLM analysis only runs on pre-filtered candidates, reducing API calls
+ * - Combines quantitative (vectors) and qualitative (LLM) methods
+ */
+
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -26,54 +50,57 @@ export async function findSimilarEntries(
   }
 
   try {
-    // Use MongoDB's $vectorSearch if available (requires MongoDB Atlas)
-    // This requires the vector index to be set up in MongoDB Atlas
-    const similarEntries = await Entry.aggregate([
-      {
-        $search: {
-          vectorSearch: {
-            queryVector: targetEntry.embeddings,
-            path: "embeddings",
-            numCandidates: limit * 10, // Search through more candidates to get better results
-            limit: limit + 1, // +1 because the target entry itself will be included
-            index: "vector_index"
-          },
+    // Try using MongoDB Atlas Search with knnBeta operator
+    try {
+      const similarEntries = await Entry.aggregate([
+        {
+          $search: {
+            index: "vector_index",
+            knnBeta: {
+              vector: targetEntry.embeddings,
+              path: "embeddings",
+              k: limit + 1
+            }
+          }
+        },
+        {
+          $match: {
+            // Exclude the target entry itself
+            _id: { $ne: new mongoose.Types.ObjectId(targetEntry._id) },
+            // Only search within the same user's entries
+            userId: new mongoose.Types.ObjectId(targetEntry.userId)
+          }
+        },
+        {
+          $project: {
+            _id: 1,
+            title: 1,
+            content: 1,
+            tags: 1,
+            contentType: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            score: { $meta: "searchScore" }
+          }
+        },
+        {
+          $match: {
+            score: { $gt: threshold }
+          }
+        },
+        {
+          $limit: limit
         }
-      },
-      {
-        $match: {
-          // Exclude the target entry itself
-          _id: { $ne: new mongoose.Types.ObjectId(targetEntry._id) },
-          // Only search within the same user's entries
-          userId: new mongoose.Types.ObjectId(targetEntry.userId)
-        }
-      },
-      {
-        $project: {
-          _id: 1,
-          title: 1,
-          content: 1,
-          tags: 1,
-          contentType: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          score: { $meta: "searchScore" }
-        }
-      },
-      {
-        $match: {
-          score: { $gt: threshold }
-        }
-      },
-      {
-        $limit: limit
-      }
-    ]);
+      ]);
 
-    return similarEntries.map((entry: any) => ({
-      entry,
-      score: entry.score
-    }));
+      return similarEntries.map((entry: any) => ({
+        entry,
+        score: entry.score
+      }));
+    } catch (vectorError) {
+      console.error('Vector search failed, trying text similarity fallback:', vectorError);
+      throw vectorError; // Throw to use the fallback approach
+    }
   } catch (error) {
     console.error('Error finding similar entries:', error);
     
@@ -96,14 +123,17 @@ export async function findSimilarEntries(
 
 /**
  * Generate a natural language reason for linking two entries using GPT-4
+ * This is called ONLY after vector similarity has already determined a potential match.
  * 
  * @param sourceEntry The source entry
  * @param targetEntry The target entry to link to
+ * @param vectorSimilarityScore The similarity score from the vector comparison (0-1)
  * @returns A natural language reason for the link, or null if no meaningful connection
  */
 export async function generateLinkReason(
   sourceEntry: any,
-  targetEntry: any
+  targetEntry: any,
+  vectorSimilarityScore: number = 0.7
 ): Promise<string | null> {
   if (!process.env.OPENAI_API_KEY) {
     // Fallback if no API key is available
@@ -111,6 +141,19 @@ export async function generateLinkReason(
   }
 
   try {
+    // If vector similarity is extremely high (>0.9), we can assume a strong connection
+    // without making an additional API call
+    if (vectorSimilarityScore > 0.9) {
+      // Check for exact duplicates
+      if (sourceEntry.title === targetEntry.title && 
+          sourceEntry.content === targetEntry.content) {
+        return "Duplicate entries with identical content";
+      }
+      
+      // For very similar but not identical content
+      return `Very similar content (${Math.round(vectorSimilarityScore * 100)}% match)`;
+    }
+    
     // Extract relevant information from both entries
     const sourceInfo = {
       title: sourceEntry.title,
@@ -146,7 +189,9 @@ Content: ${sourceInfo.content}
 Entry 2 (${targetInfo.date}):
 Title: ${targetInfo.title}
 Tags: ${targetInfo.tags.join(', ')}
-Content: ${targetInfo.content}`
+Content: ${targetInfo.content}
+
+Vector similarity score: ${vectorSimilarityScore.toFixed(2)} (0-1 scale)`
         }
       ],
       max_tokens: 100,
