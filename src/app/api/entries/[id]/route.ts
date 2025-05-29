@@ -3,14 +3,11 @@ import { dbConnect, Entry } from '@/lib/database';
 import mongoose from 'mongoose';
 import { getAuthenticatedUser } from '@/lib/auth/session';
 
-interface RouteParams {
-  params: {
-    id: string;
-  };
-}
-
 // GET a single entry by ID
-export async function GET(request: NextRequest, { params }: RouteParams) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
     // Authenticate user
     const userData = await getAuthenticatedUser(request);
@@ -24,7 +21,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     await dbConnect();
     
     // Validate ID
-    if (!params.id || !mongoose.isValidObjectId(params.id)) {
+    const { id } = await params;
+    if (!id || !mongoose.isValidObjectId(id)) {
       return NextResponse.json(
         { 
           status: 'error',
@@ -36,7 +34,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     
     // Find entry
     const entry = await Entry.findOne({
-      _id: new mongoose.Types.ObjectId(params.id),
+      _id: new mongoose.Types.ObjectId(id),
       userId: new mongoose.Types.ObjectId(userData.id)
     }).lean();
     
@@ -70,12 +68,12 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 // PUT (update) an entry
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     await dbConnect();
     
-    const { id } = params;
+    const { id } = await params;
     
     // Validate ID format
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -128,7 +126,10 @@ export async function PUT(
 }
 
 // DELETE an entry by ID
-export async function DELETE(request: NextRequest, { params }: RouteParams) {
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
     // Authenticate user
     const userData = await getAuthenticatedUser(request);
@@ -142,7 +143,8 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     await dbConnect();
     
     // Validate ID
-    if (!params.id || !mongoose.isValidObjectId(params.id)) {
+    const { id } = await params;
+    if (!id || !mongoose.isValidObjectId(id)) {
       return NextResponse.json(
         { 
           status: 'error',
@@ -152,7 +154,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
     
-    const entryId = new mongoose.Types.ObjectId(params.id);
+    const entryId = new mongoose.Types.ObjectId(id);
     const userId = new mongoose.Types.ObjectId(userData.id);
     
     // Find entry before deleting (to verify ownership)
@@ -190,7 +192,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       // Wait for all updates to complete
       if (updatePromises.length > 0) {
         await Promise.all(updatePromises);
-        console.log(`Removed references to entry ${params.id} from ${updatePromises.length} other entries`);
+        console.log(`Removed references to entry ${id} from ${updatePromises.length} other entries`);
       }
     } catch (error) {
       console.error('Error cleaning up entry references:', error);

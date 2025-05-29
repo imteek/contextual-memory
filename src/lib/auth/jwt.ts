@@ -1,4 +1,4 @@
-import { sign, verify, JwtPayload } from 'jsonwebtoken';
+import { sign, verify, JwtPayload, SignOptions } from 'jsonwebtoken';
 import { IUser } from '../database/models/User';
 import { Types } from 'mongoose';
 
@@ -24,9 +24,11 @@ export const generateToken = (user: IUser): string => {
     email: user.email
   };
   
+  // Added explicit algorithm to help TypeScript understand the signature
   return sign(payload, JWT_SECRET, {
-    expiresIn: JWT_EXPIRES_IN
-  });
+    expiresIn: JWT_EXPIRES_IN,
+    algorithm: 'HS256'
+  } as SignOptions);
 };
 
 // Verify and decode JWT token

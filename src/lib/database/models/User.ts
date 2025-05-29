@@ -63,18 +63,19 @@ UserSchema.pre('save', async function(next) {
     // Generate a salt
     const salt = await bcrypt.genSalt(10);
     // Hash the password along with the new salt
-    this.password = await bcrypt.hash(this.password, salt);
+    this.password = await bcrypt.hash(this.password as string, salt);
     next();
-  } catch (error: any) {
-    next(error);
+  } catch (error) {
+    // Convert unknown error to Error type for Mongoose
+    next(error instanceof Error ? error : new Error(String(error)));
   }
 });
 
 // Compare password method
 UserSchema.methods.comparePassword = async function(candidatePassword: string): Promise<boolean> {
   try {
-    // @ts-ignore: this has password property when called with .select('+password')
-    return await bcrypt.compare(candidatePassword, this.password);
+    // Use type assertion instead of ts-expect-error
+    return await bcrypt.compare(candidatePassword, this.password as string);
   } catch (error) {
     throw error;
   }

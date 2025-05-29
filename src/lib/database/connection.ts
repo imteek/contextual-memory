@@ -7,45 +7,41 @@ if (!MONGODB_URI) {
 }
 
 /**
- * Global is used here to maintain a cached connection across hot reloads
+ * Global cache is used here to maintain a cached connection across hot reloads
  * in development. This prevents connections growing exponentially
  * during API Route usage.
  */
 
 // Define mongoose cache type
-type GlobalMongoose = {
+interface MongooseCache {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
 }
 
-// Add mongoose to the NodeJS global type
-declare global {
-  var mongoose: GlobalMongoose | undefined;
-}
-
-let cached = global.mongoose;
-
-if (!cached) {
-  cached = global.mongoose = { conn: null, promise: null };
-}
+// Create a cached connection variable outside of the function
+// that persists between function calls
+let cachedConnection: MongooseCache = { conn: null, promise: null };
 
 async function dbConnect() {
-  if (cached!.conn) {
-    return cached!.conn;
+  // If we have a cached connection, return it
+  if (cachedConnection.conn) {
+    return cachedConnection.conn;
   }
 
-  if (!cached!.promise) {
+  // If we don't have a cached connection, create a new one
+  if (!cachedConnection.promise) {
     const opts = {
       bufferCommands: false,
     };
 
-    cached!.promise = mongoose.connect(MONGODB_URI, opts).then((mongoose) => {
+    cachedConnection.promise = mongoose.connect(MONGODB_URI, opts).then((mongoose) => {
       return mongoose;
     });
   }
   
-  cached!.conn = await cached!.promise;
-  return cached!.conn;
+  // Wait for the connection to establish and cache it
+  cachedConnection.conn = await cachedConnection.promise;
+  return cachedConnection.conn;
 }
 
 export default dbConnect; 
