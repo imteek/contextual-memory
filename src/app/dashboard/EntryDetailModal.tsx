@@ -83,7 +83,7 @@ function LinkedEntryDetails({ entryId }: { entryId: string }) {
 interface EntryDetailModalProps {
   entry: Entry;
   onClose: () => void;
-  onDelete: (entryId: string) => Promise<void>;
+  onDelete: (entryId: string) => void;
   onEntryUpdated?: (updatedEntry: Entry, allEntries?: Entry[]) => void;
   onViewConnections?: (entryId: string) => void;
   isGraphMode?: boolean;
@@ -108,11 +108,8 @@ export default function EntryDetailModal({
     }>;
   } | null>(null);
 
-  const handleDelete = async () => {
-    if (confirm('Are you sure you want to delete this entry? This action cannot be undone.')) {
-      await onDelete(currentEntry._id);
-      onClose();
-    }
+  const handleDelete = () => {
+    onDelete(currentEntry._id);
   };
 
   const formatDate = (dateString: string) => {
@@ -157,6 +154,13 @@ export default function EntryDetailModal({
       const data = await response.json();
       setAutoLinkResults(data.data);
       
+      // Show appropriate toast notification based on results
+      if (data.data.linkedEntries.length > 0) {
+        (window as any).showSuccessToast(`Found ${data.data.linkedEntries.length} related entries!`);
+      } else {
+        (window as any).showInfoToast('No new related entries found.');
+      }
+      
       // If successful and links were found, fetch the updated entry and all linked entries
       if (data.data.linkedEntries && data.data.linkedEntries.length > 0) {
         // First get the current (source) entry
@@ -198,7 +202,7 @@ export default function EntryDetailModal({
       }
     } catch (error) {
       console.error('Error finding related entries:', error);
-      alert('Failed to find related entries: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      (window as any).showErrorToast('Failed to find related entries: ' + (error instanceof Error ? error.message : 'Unknown error'));
     } finally {
       setLoading(false);
     }
@@ -261,7 +265,20 @@ export default function EntryDetailModal({
           {/* Related Entries Section */}
           {currentEntry.linkedEntries && currentEntry.linkedEntries.length > 0 && (
             <div className="mt-6">
-              <h3 className="text-md font-medium text-gray-900 mb-2">Related Entries</h3>
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-md font-medium text-gray-900">Related Entries</h3>
+                <button
+                  type="button"
+                  onClick={handleFindRelated}
+                  disabled={loading}
+                  className={`px-3 py-1 text-xs rounded-md transition-colors flex items-center ${loading ? 'bg-gray-300' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200'}`}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  {loading ? 'Finding...' : 'Find more connections'}
+                </button>
+              </div>
               <div className="space-y-3">
                 {currentEntry.linkedEntries.map((link, index) => (
                   <div 
@@ -289,27 +306,18 @@ export default function EntryDetailModal({
             </div>
           )}
           
-          {/* Auto-link Results */}
-          {autoLinkResults && (
-            <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-md">
-              <p className="text-sm text-green-800">
-                {autoLinkResults.linkedEntries.length > 0 
-                  ? `Found ${autoLinkResults.linkedEntries.length} related entries!` 
-                  : 'No new related entries found.'}
-              </p>
-            </div>
-          )}
-          
           <div className="mt-6 flex justify-between">
             <div className="flex space-x-2">
-              <button
-                type="button"
-                onClick={handleFindRelated}
-                disabled={loading}
-                className={`px-4 py-2 ${loading ? 'bg-gray-300' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'} rounded-md text-sm font-medium transition-colors`}
-              >
-                {loading ? 'Finding related...' : 'Find Related Entries'}
-              </button>
+              {!currentEntry.linkedEntries || currentEntry.linkedEntries.length === 0 ? (
+                <button
+                  type="button"
+                  onClick={handleFindRelated}
+                  disabled={loading}
+                  className={`px-4 py-2 ${loading ? 'bg-gray-300' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'} rounded-md text-sm font-medium transition-colors`}
+                >
+                  {loading ? 'Finding related...' : 'Find Related Entries'}
+                </button>
+              ) : null}
               
               {onViewConnections && !isGraphMode && (
                 <button

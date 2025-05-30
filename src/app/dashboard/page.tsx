@@ -8,6 +8,10 @@ import { User, Entry, GraphData } from './types';
 
 // Import the graph component directly
 import GraphView from './graph-view';
+// Import toast container
+import ToastContainer from './ToastNotification';
+// Import confirm dialog
+import ConfirmDialog from './ConfirmDialog';
 
 // Dynamically import components (client-side only)
 const EntryDetailModal = dynamic(() => import('./EntryDetailModal'), { ssr: false });
@@ -69,6 +73,21 @@ export default function Dashboard() {
   const [selectedEntry, setSelectedEntry] = useState<Entry | null>(null);
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [showOnlyConnected, setShowOnlyConnected] = useState(false);
+  
+  // Add state for confirm dialog
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    entryId?: string;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+  });
+  
+  // Add state to track newly created entry for highlighting
+  const [highlightedEntryId, setHighlightedEntryId] = useState<string | null>(null);
   
   const graphRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
@@ -210,7 +229,7 @@ export default function Dashboard() {
     } catch (error) {
       console.error('Error searching entries:', error);
       setSearchStatus('error');
-      alert('Failed to search entries: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      (window as any).showErrorToast('Failed to search entries: ' + (error instanceof Error ? error.message : 'Unknown error'));
       // In case of error, fetch all entries to avoid an empty state
       await fetchEntries();
     } finally {
@@ -220,44 +239,70 @@ export default function Dashboard() {
   
   const handleNewEntrySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
+    
+    setLoading(true);
     
     try {
-      setLoading(true);
-      
       const token = localStorage.getItem('token');
       if (!token) throw new Error('Not authenticated');
       
-      // Send entry to API
       const response = await fetch('/api/entries', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`
         },
-        body: JSON.stringify({
-          title: newEntry.title,
-          content: newEntry.content,
-          contentType: newEntry.contentType,
-          tags: newEntry.tags
-        })
+        body: JSON.stringify(newEntry)
       });
       
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to create entry');
+        throw new Error('Failed to create entry');
       }
       
       // Get the created entry
       const data = await response.json();
       
-      // Add to entries
-      setEntries([data.data, ...entries]);
-      
-      // Show auto-linking results if available
+      // Check if auto-linking was successful
       if (data.autoLinking && data.autoLinking.success && data.autoLinking.linkedEntries.length > 0) {
-        alert(`Entry created! Automatically linked to ${data.autoLinking.linkedEntries.length} related entries.`);
+        // If we have auto-linked entries, reload all entries to get the complete graph
+        await fetchEntries();
+        
+        // Show success message
+        (window as any).showSuccessToast(`Entry created successfully!`);
+        
+        // Show a separate notification about the linked entries
+        setTimeout(() => {
+          (window as any).showInfoToast(`Auto-linked to ${data.autoLinking.linkedEntries.length} related entries.`);
+        }, 300);
+        
+        // In graph view, show the entry detail with linked entries
+        if (viewMode === 'graph') {
+          setSelectedEntry(data.data);
+        } else {
+          // In timeline view, set the highlighted entry ID
+          setHighlightedEntryId(data.data._id);
+          
+          // Clear the highlight after a few seconds
+          setTimeout(() => {
+            setHighlightedEntryId(null);
+          }, 5000);
+        }
       } else {
-        alert('Entry created successfully!');
+        // Add to entries if no auto-linking
+        setEntries([data.data, ...entries]);
+        (window as any).showSuccessToast('Entry created successfully!');
+        
+        // Set highlighted entry ID
+        setHighlightedEntryId(data.data._id);
+        
+        // Clear the highlight after a few seconds
+        setTimeout(() => {
+          setHighlightedEntryId(null);
+        }, 5000);
+        
+        // Regenerate graph data with the new entry
+        generateGraphData([data.data, ...entries]);
       }
       
       // Reset form and close modal
@@ -269,12 +314,9 @@ export default function Dashboard() {
         tags: []
       });
       
-      // Regenerate graph data with the new entry
-      generateGraphData([data.data, ...entries]);
-      
     } catch (error) {
       console.error('Error creating entry:', error);
-      alert('Failed to create entry: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      (window as any).showErrorToast('Failed to create entry: ' + (error instanceof Error ? error.message : 'Unknown error'));
     } finally {
       setLoading(false);
     }
@@ -445,6 +487,18 @@ export default function Dashboard() {
       const entry = entries.find(e => e._id === node.id);
       if (entry) {
         setSelectedEntry(entry);
+        
+        // If we're in graph view, automatically show only connected nodes
+        if (viewMode === 'graph' && !showOnlyConnected) {
+          setShowOnlyConnected(true);
+        }
+        
+        // Log the linked entries for debugging
+        if (entry.linkedEntries && entry.linkedEntries.length > 0) {
+          console.log('Entry has linked entries:', entry.linkedEntries);
+        }
+      } else {
+        console.warn(`Entry with ID ${node.id} not found in entries array`);
       }
     } else if (node.group === 'tag') {
       // Extract tag name from the ID (remove the "tag-" prefix)
@@ -462,7 +516,7 @@ export default function Dashboard() {
         }
       }, 0);
     }
-  }, [entries]);
+  }, [entries, viewMode, showOnlyConnected, setShowOnlyConnected]);
   
   // Toggle between showing all nodes and only connected nodes
   const handleToggleConnectionView = useCallback(() => {
@@ -473,19 +527,30 @@ export default function Dashboard() {
   const handleCloseModal = useCallback(() => {
     setSelectedEntry(null);
     if (showOnlyConnected) {
-      // Either reset to show all nodes or keep the focused view without the modal
-      if (confirm('Return to full graph view?')) {
-        setFocusedNodeId(null);
-        setShowOnlyConnected(false);
-      }
+      // Automatically return to full graph view without prompting
+      setFocusedNodeId(null);
+      setShowOnlyConnected(false);
     }
   }, [showOnlyConnected]);
   
-  // Add a function to delete an entry
-  const handleDeleteEntry = async (entryId: string) => {
-    if (!confirm('Are you sure you want to delete this entry? This action cannot be undone.')) {
-      return;
-    }
+  // Update the delete entry function to show the confirmation dialog first
+  const handleDeleteEntry = (entryId: string) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Delete Entry',
+      message: 'Are you sure you want to delete this entry? This action cannot be undone.',
+      entryId: entryId
+    });
+  };
+  
+  // Function to handle the actual deletion after confirmation
+  const confirmDeleteEntry = async () => {
+    if (!confirmDialog.entryId) return;
+    
+    const entryId = confirmDialog.entryId;
+    
+    // Close the dialog
+    setConfirmDialog({ isOpen: false, title: '', message: '' });
     
     try {
       setLoading(true);
@@ -530,12 +595,19 @@ export default function Dashboard() {
       // Regenerate graph data
       generateGraphData(entries.filter(entry => entry._id !== entryId));
       
+      (window as any).showSuccessToast('Entry deleted successfully');
+      
     } catch (error) {
       console.error('Error deleting entry:', error);
-      alert('Failed to delete entry: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      (window as any).showErrorToast('Failed to delete entry: ' + (error instanceof Error ? error.message : 'Unknown error'));
     } finally {
       setLoading(false);
     }
+  };
+  
+  // Function to cancel the delete operation
+  const cancelDeleteEntry = () => {
+    setConfirmDialog({ isOpen: false, title: '', message: '' });
   };
   
   // Function to handle viewing connections of a specific entry in graph view
@@ -560,6 +632,20 @@ export default function Dashboard() {
   
   return (
     <div className="min-h-screen bg-gray-50">
+      {/* Toast Container */}
+      <ToastContainer />
+      
+      {/* Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={confirmDialog.isOpen}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        confirmText="Delete"
+        confirmType="danger"
+        onConfirm={confirmDeleteEntry}
+        onCancel={cancelDeleteEntry}
+      />
+      
       {/* Header */}
       <header className="bg-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
@@ -659,7 +745,14 @@ export default function Dashboard() {
               </div>
             ) : (
               entries.map(entry => (
-                <div key={entry._id} className="bg-white shadow rounded-lg overflow-hidden hover:shadow-md transition-shadow">
+                <div 
+                  key={entry._id} 
+                  className={`bg-white shadow rounded-lg overflow-hidden hover:shadow-md transition-all ${
+                    highlightedEntryId === entry._id 
+                      ? 'ring-2 ring-indigo-500 animate-pulse-subtle transform scale-[1.01]' 
+                      : ''
+                  }`}
+                >
                   <div className="p-6">
                     <div className="flex justify-between items-start">
                       <h3 className="text-lg font-semibold text-gray-900">{entry.title}</h3>
@@ -691,6 +784,82 @@ export default function Dashboard() {
                           {tag}
                         </span>
                       ))}
+                    </div>
+                    
+                    {/* Show linked entries info for all entries that have connections */}
+                    {entry.linkedEntries && entry.linkedEntries.length > 0 && (
+                      <div className={`mt-3 p-2 rounded-md border ${
+                        highlightedEntryId === entry._id 
+                          ? 'bg-blue-50 border-blue-200'
+                          : 'bg-gray-50 border-gray-200'
+                      }`}>
+                        <div className={`text-sm ${
+                          highlightedEntryId === entry._id
+                            ? 'text-blue-700'
+                            : 'text-gray-700'
+                        }`}>
+                          <div className="flex items-center">
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                            </svg>
+                            <span>Connected to {entry.linkedEntries.length} related {entry.linkedEntries.length === 1 ? 'entry' : 'entries'}</span>
+                          </div>
+                          
+                          <div className="flex space-x-2 mt-2">
+                            <button 
+                              onClick={() => setSelectedEntry(entry)}
+                              className={`text-xs py-1 px-2 rounded transition-colors flex items-center ${
+                                highlightedEntryId === entry._id
+                                  ? 'bg-blue-200 hover:bg-blue-300 text-blue-800'
+                                  : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
+                              }`}
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                              </svg>
+                              View connections
+                            </button>
+                            
+                            <button 
+                              onClick={() => handleViewConnections(entry._id)}
+                              className={`text-xs py-1 px-2 rounded transition-colors flex items-center ${
+                                highlightedEntryId === entry._id
+                                  ? 'bg-blue-200 hover:bg-blue-300 text-blue-800'
+                                  : 'bg-gray-200 hover:bg-gray-300 text-gray-800'
+                              }`}
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                              </svg>
+                              Graph view
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Footer actions */}
+                    <div className="mt-4 pt-3 border-t border-gray-100 flex justify-between">
+                      <button
+                        onClick={() => setSelectedEntry(entry)}
+                        className="text-sm text-indigo-500 hover:text-indigo-700 flex items-center"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                        </svg>
+                        Find related
+                      </button>
+                      
+                      <button
+                        onClick={() => setSelectedEntry(entry)}
+                        className="text-sm text-indigo-600 hover:text-indigo-700 flex items-center"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                        View details
+                      </button>
                     </div>
                   </div>
                 </div>
