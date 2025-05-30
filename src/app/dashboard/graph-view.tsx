@@ -41,8 +41,16 @@ export default function GraphView({
         val: node.val || 1,
         color: node.color,
         group: node.group,
-        // Add stored position if available
-        ...(savedPos ? { x: savedPos.x, y: savedPos.y } : {})
+        // If the graph is stabilized, use fixed positions
+        ...(savedPos && isStabilized ? { 
+          x: savedPos.x, 
+          y: savedPos.y,
+          fx: savedPos.x,
+          fy: savedPos.y
+        } : savedPos ? {
+          x: savedPos.x,
+          y: savedPos.y
+        } : {})
       };
     });
     
@@ -90,7 +98,7 @@ export default function GraphView({
     }
     
     return { nodes, links };
-  }, [graphData, focusNodeId, showOnlyConnected]);
+  }, [graphData, focusNodeId, showOnlyConnected, isStabilized]);
 
   // Update dimensions when container size changes
   useEffect(() => {
@@ -112,48 +120,6 @@ export default function GraphView({
     window.addEventListener('resize', updateDimensions);
     return () => window.removeEventListener('resize', updateDimensions);
   }, []);
-  
-  // Save node positions on engine stop
-  const handleEngineStop = useCallback(() => {
-    if (!graphRef.current || nodesStabilizedRef.current) return;
-    
-    try {
-      // Wait a bit to ensure the graph has stabilized
-      setTimeout(() => {
-        // Check if graphRef is still valid
-        if (graphRef.current) {
-          // Get the current nodes from the graph instance
-          const currentNodes = graphRef.current._state.nodes;
-          if (Array.isArray(currentNodes)) {
-            currentNodes.forEach((node: any) => {
-              if (node.id && typeof node.x === 'number' && typeof node.y === 'number') {
-                positionsRef.current.set(String(node.id), { x: node.x, y: node.y });
-              }
-            });
-            // Mark as stabilized
-            nodesStabilizedRef.current = true;
-            setIsStabilized(true);
-          }
-        }
-      }, 100);
-    } catch (err) {
-      console.error("Error in handleEngineStop:", err);
-    }
-  }, []);
-  
-  // When component mounts or focus changes, stop physics after a delay
-  useEffect(() => {
-    if (!graphRef.current) return;
-    
-    const timer = setTimeout(() => {
-      if (graphRef.current && !isStabilized) {
-        // Mark as stabilized after a delay to allow initial positioning
-        setIsStabilized(true);
-      }
-    }, 3000); // Allow 3 seconds for initial positioning
-    
-    return () => clearTimeout(timer);
-  }, [isStabilized]);
   
   // Center the graph on the focus node when it changes
   useEffect(() => {
@@ -186,19 +152,104 @@ export default function GraphView({
   // Save position when node is dragged
   const handleNodeDragEnd = (node: any) => {
     if (node && node.id && typeof node.x === 'number' && typeof node.y === 'number') {
+      // Save position to our position ref
       positionsRef.current.set(String(node.id), { x: node.x, y: node.y });
+      
+      // When stabilized, update the fixed position to match the current position
+      if (isStabilized) {
+        node.fx = node.x;
+        node.fy = node.y;
+      }
     }
   };
   
   // Save position during node drag
   const handleNodeDrag = (node: any) => {
     if (node && node.id && typeof node.x === 'number' && typeof node.y === 'number') {
+      // Save position to our position ref
       positionsRef.current.set(String(node.id), { x: node.x, y: node.y });
+      
+      // When stabilized, continuously update the fixed position during drag
+      if (isStabilized) {
+        node.fx = node.x;
+        node.fy = node.y;
+      }
     }
   };
 
   // Get the data to render
   const data = processedData();
+  
+  // Save node positions on engine stop
+  const handleEngineStop = useCallback(() => {
+    if (!graphRef.current) return;
+    
+    try {
+      // Access nodes directly from our processed data
+      const currentNodes = data.nodes;
+      
+      if (Array.isArray(currentNodes)) {
+        currentNodes.forEach((node: any) => {
+          if (node.id && typeof node.x === 'number' && typeof node.y === 'number') {
+            // Store both regular and fixed positions
+            positionsRef.current.set(String(node.id), { x: node.x, y: node.y });
+            
+            // Set fixed positions to prevent nodes from moving
+            if (isStabilized) {
+              node.fx = node.x;
+              node.fy = node.y;
+            }
+          }
+        });
+        
+        // Mark as stabilized only if not already stabilized
+        if (!nodesStabilizedRef.current) {
+          nodesStabilizedRef.current = true;
+          setIsStabilized(true);
+        }
+      }
+    } catch (err) {
+      console.error("Error in handleEngineStop:", err);
+    }
+  }, [isStabilized, data]);
+  
+  // Recalculate layout button handler
+  const handleRecalculateLayout = useCallback(() => {
+    // Clear fixed positions but keep the saved positions
+    if (Array.isArray(data.nodes)) {
+      data.nodes.forEach((node: any) => {
+        // Remove fixed positions to allow the graph to recalculate
+        delete node.fx;
+        delete node.fy;
+      });
+    }
+    
+    // Temporarily allow the simulation to run
+    nodesStabilizedRef.current = false;
+    setIsStabilized(false);
+    
+    // After the simulation runs for a while, restabilize it
+    setTimeout(() => {
+      if (graphRef.current) {
+        handleEngineStop();
+        setIsStabilized(true);
+      }
+    }, 3000);
+  }, [data, handleEngineStop]);
+
+  // When component mounts or focus changes, stop physics after a delay
+  useEffect(() => {
+    if (!graphRef.current) return;
+    
+    // Initial delay to let the simulation run
+    const timer = setTimeout(() => {
+      if (graphRef.current && !isStabilized) {
+        setIsStabilized(true);
+      }
+    }, 3000); // Allow 3 seconds for initial positioning
+    
+    return () => clearTimeout(timer);
+  }, [isStabilized]);
 
   return (
     <div className="relative h-full w-full" ref={containerRef}>
@@ -216,10 +267,7 @@ export default function GraphView({
       {isStabilized && (
         <div className="absolute top-4 right-4 z-10 bg-white/80 backdrop-blur-sm p-2 rounded-md shadow-md">
           <button
-            onClick={() => {
-              nodesStabilizedRef.current = false;
-              setIsStabilized(false);
-            }}
+            onClick={handleRecalculateLayout}
             className="text-xs px-3 py-1.5 bg-green-100 hover:bg-green-200 text-green-700 rounded-md font-medium transition-colors"
           >
             Recalculate Layout
@@ -246,6 +294,10 @@ export default function GraphView({
           cooldownTime={isStabilized ? 0 : 2000} // No cooldown time when stabilized
           onEngineStop={handleEngineStop} // Save positions when physics stops
           enableNodeDrag={true} // Always allow node dragging
+          d3AlphaDecay={isStabilized ? 0.5 : 0.02} // Faster decay when stabilized
+          d3VelocityDecay={isStabilized ? 0.7 : 0.25} // Faster velocity decay when stabilized
+          enableZoomInteraction={true}
+          enablePanInteraction={true}
         />
       )}
     </div>
